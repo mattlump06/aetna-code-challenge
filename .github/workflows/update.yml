@@ -1,0 +1,134 @@
+name: Update Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'Application name (must match deployed app name)'
+        required: true
+        type: string
+      environment:
+        description: 'Environment (dev/staging/prod)'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      container_image:
+        description: 'New container image URL (e.g., nginx:1.25 or myapp:v2.0.0)'
+        required: true
+        type: string
+      aws_region:
+        description: 'AWS region'
+        required: true
+        type: string
+        default: 'us-east-1'
+
+env:
+  AWS_REGION: ${{ inputs.aws_region }}
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: Terraform Format Check
+        run: |
+          cd terraform
+          terraform fmt -check
+
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init
+
+      - name: Ensure jq is installed
+        run: |
+          if ! command -v jq &> /dev/null; then
+            echo "Installing jq..."
+            sudo apt-get update && sudo apt-get install -y jq
+          else
+            echo "jq is already installed"
+          fi
+
+      - name: Terraform Plan (Update)
+        run: |
+          cd terraform
+          # Read existing values from Terraform state if available
+          if terraform state list &>/dev/null; then
+            echo "Reading existing values from Terraform state..."
+            # Try to extract values from state, fallback to defaults
+            STATE_OUTPUT=$(terraform show -json 2>/dev/null || echo "{}")
+            
+            CONTAINER_PORT=$(echo "$STATE_OUTPUT" | jq -r '.values.root_module.child_modules[]? | select(.address == "module.ecs")? | .resources[]? | select(.type == "aws_ecs_task_definition")? | .values.container_definitions | fromjson | .[0].portMappings[0].containerPort // empty' 2>/dev/null || echo "")
+            CPU=$(echo "$STATE_OUTPUT" | jq -r '.values.root_module.child_modules[]? | select(.address == "module.ecs")? | .resources[]? | select(.type == "aws_ecs_task_definition")? | .values.cpu // empty' 2>/dev/null || echo "")
+            MEMORY=$(echo "$STATE_OUTPUT" | jq -r '.values.root_module.child_modules[]? | select(.address == "module.ecs")? | .resources[]? | select(.type == "aws_ecs_task_definition")? | .values.memory // empty' 2>/dev/null || echo "")
+            DESIRED_COUNT=$(echo "$STATE_OUTPUT" | jq -r '.values.root_module.child_modules[]? | select(.address == "module.ecs")? | .resources[]? | select(.type == "aws_ecs_service")? | .values.desired_count // empty' 2>/dev/null || echo "")
+            ALERT_EMAIL=$(echo "$STATE_OUTPUT" | jq -r '.values.root_module.child_modules[]? | select(.address == "module.cloudwatch")? | .resources[]? | select(.type == "aws_sns_topic_subscription")? | .values.endpoint // empty' 2>/dev/null || echo "")
+            
+            # Use defaults if values weren't found
+            CONTAINER_PORT=${CONTAINER_PORT:-80}
+            CPU=${CPU:-256}
+            MEMORY=${MEMORY:-512}
+            DESIRED_COUNT=${DESIRED_COUNT:-1}
+            ALERT_EMAIL=${ALERT_EMAIL:-dummy@example.com}
+            
+            echo "Using values from state:"
+            echo "  Container Port: $CONTAINER_PORT"
+            echo "  CPU: $CPU"
+            echo "  Memory: $MEMORY"
+            echo "  Desired Count: $DESIRED_COUNT"
+            echo "  Alert Email: $ALERT_EMAIL"
+          else
+            echo "State not available, using default values"
+            CONTAINER_PORT=80
+            CPU=256
+            MEMORY=512
+            DESIRED_COUNT=1
+            ALERT_EMAIL=dummy@example.com
+          fi
+          
+          terraform plan \
+            -var="app_name=${{ inputs.app_name }}" \
+            -var="environment=${{ inputs.environment }}" \
+            -var="container_image=${{ inputs.container_image }}" \
+            -var="container_port=$CONTAINER_PORT" \
+            -var="cpu=$CPU" \
+            -var="memory=$MEMORY" \
+            -var="desired_count=$DESIRED_COUNT" \
+            -var="alert_email=$ALERT_EMAIL" \
+            -var="aws_region=${{ inputs.aws_region }}" \
+            -out=tfplan
+
+      - name: Terraform Apply (Update)
+        run: |
+          cd terraform
+          terraform apply -auto-approve tfplan
+
+      - name: Output update information
+        run: |
+          cd terraform
+          echo "✅ Infrastructure updated successfully!"
+          echo "Service URL: $(terraform output -raw service_url)"
+          echo "Updated container image: ${{ inputs.container_image }}"
+          echo ""
+          echo "The ECS service will automatically deploy the new container image."
+

@@ -1,0 +1,84 @@
+name: Destroy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'Application name (must match deployed app name)'
+        required: true
+        type: string
+      environment:
+        description: 'Environment (dev/staging/prod)'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      aws_region:
+        description: 'AWS region'
+        required: true
+        type: string
+        default: 'us-east-1'
+      confirmation:
+        description: 'Type "destroy" to confirm deletion'
+        required: true
+        type: string
+
+env:
+  AWS_REGION: ${{ inputs.aws_region }}
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate confirmation
+        run: |
+          if [ "${{ inputs.confirmation }}" != "destroy" ]; then
+            echo "Error: Confirmation must be exactly 'destroy'"
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init
+
+      - name: Terraform Destroy
+        run: |
+          cd terraform
+          terraform destroy \
+            -var="app_name=${{ inputs.app_name }}" \
+            -var="environment=${{ inputs.environment }}" \
+            -var="container_image=nginx:latest" \
+            -var="container_port=80" \
+            -var="cpu=256" \
+            -var="memory=512" \
+            -var="desired_count=1" \
+            -var="alert_email=dummy@example.com" \
+            -var="aws_region=${{ inputs.aws_region }}" \
+            -auto-approve
+
+      - name: Destroy complete
+        run: |
+          echo "✅ Infrastructure destroyed successfully!"
+          echo "All resources have been removed from AWS."
+

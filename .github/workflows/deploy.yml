@@ -1,0 +1,118 @@
+name: Deploy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'Application name'
+        required: true
+        type: string
+      environment:
+        description: 'Environment (dev/staging/prod)'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      container_image:
+        description: 'Container image URL (e.g., nginx:latest)'
+        required: true
+        type: string
+      container_port:
+        description: 'Container port'
+        required: true
+        type: number
+        default: 80
+      cpu:
+        description: 'CPU units (256, 512, 1024)'
+        required: true
+        type: number
+        default: 256
+      memory:
+        description: 'Memory in MB (512, 1024, 2048)'
+        required: true
+        type: number
+        default: 512
+      desired_count:
+        description: 'Desired task count'
+        required: true
+        type: number
+        default: 1
+      alert_email:
+        description: 'Email for CloudWatch alerts'
+        required: true
+        type: string
+      aws_region:
+        description: 'AWS region'
+        required: true
+        type: string
+        default: 'us-east-1'
+
+env:
+  AWS_REGION: ${{ inputs.aws_region }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: Terraform Format Check
+        run: |
+          cd terraform
+          terraform fmt -check
+
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init
+
+      - name: Terraform Validate
+        run: |
+          cd terraform
+          terraform validate
+
+      - name: Terraform Plan
+        run: |
+          cd terraform
+          terraform plan \
+            -var="app_name=${{ inputs.app_name }}" \
+            -var="environment=${{ inputs.environment }}" \
+            -var="container_image=${{ inputs.container_image }}" \
+            -var="container_port=${{ inputs.container_port }}" \
+            -var="cpu=${{ inputs.cpu }}" \
+            -var="memory=${{ inputs.memory }}" \
+            -var="desired_count=${{ inputs.desired_count }}" \
+            -var="alert_email=${{ inputs.alert_email }}" \
+            -var="aws_region=${{ inputs.aws_region }}" \
+            -out=tfplan
+
+      - name: Terraform Apply
+        run: |
+          cd terraform
+          terraform apply -auto-approve tfplan
+
+      - name: Output deployment information
+        run: |
+          cd terraform
+          echo "Application deployed successfully!"
+          echo "Service URL: $(terraform output -raw service_url)"
+          echo "S3 Bucket: $(terraform output -raw s3_bucket_name)"
+
