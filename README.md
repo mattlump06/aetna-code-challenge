@@ -6,6 +6,7 @@ This project provides a self-service platform for deploying containerized applic
 
 The solution consists of:
 - **ECS Fargate**: Containerized workload running in a fully managed VPC
+- **ECR Repository**: Amazon Elastic Container Registry for storing Docker images with image scanning and lifecycle policies
 - **Application Load Balancer**: Public-facing load balancer for service access
 - **S3 Bucket**: Secure storage bucket with encryption and versioning enabled
 - **CloudWatch Alarms**: Monitoring for CPU utilization and error logs with email notifications
@@ -64,14 +65,49 @@ The solution consists of:
    - Edit `terraform/main.tf` to configure S3 backend for state management
    - Or use local state for demo purposes
 
-3. **Deploy Infrastructure:**
+### Build and Push Docker Image
+
+Before deploying infrastructure, you should build your Docker image and push it to ECR:
+
+1. **Build Image via GitHub Actions:**
+   - Go to GitHub Actions tab in your repository
+   - Select **"Build and Push Docker Image"** workflow
+   - Click **"Run workflow"**
+   - Fill in the required inputs:
+     - **app_name**: Name of your application (e.g., "hello-world")
+     - **environment**: Environment name (dev/staging/prod)
+     - **aws_region**: AWS region (default: us-east-1)
+     - **image_tag**: Optional custom tag (defaults to commit SHA)
+   - Click **"Run workflow"**
+
+2. **Get the ECR Image URI:**
+   - After the workflow completes, check the workflow output for the image URI
+   - Format: `{account-id}.dkr.ecr.{region}.amazonaws.com/{app_name}-{environment}-app:{tag}`
+   - Or use `latest` tag: `{account-id}.dkr.ecr.{region}.amazonaws.com/{app_name}-{environment}-app:latest`
+
+**Note:** The workflow automatically creates the ECR repository if it doesn't exist (though it's recommended to deploy infrastructure first via Terraform, which creates the ECR repository with proper configuration).
+
+**Alternative:** You can also build locally and push manually:
+```bash
+# Authenticate with ECR
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin {account-id}.dkr.ecr.us-east-1.amazonaws.com
+
+# Build and tag
+cd app
+docker build -t {account-id}.dkr.ecr.us-east-1.amazonaws.com/{app_name}-{environment}-app:latest .
+docker push {account-id}.dkr.ecr.us-east-1.amazonaws.com/{app_name}-{environment}-app:latest
+```
+
+### Deploy Infrastructure
+
+1. **Deploy Infrastructure:**
    - Go to GitHub Actions tab in your repository
    - Select "Deploy Infrastructure" workflow
    - Click "Run workflow"
    - Fill in the required inputs:
      - **app_name**: Name of your application (e.g., "hello-world")
      - **environment**: Environment name (dev/staging/prod)
-     - **container_image**: Docker image URL (e.g., "nginx:latest" or your ECR image)
+     - **container_image**: Docker image URL from ECR (e.g., `{account-id}.dkr.ecr.us-east-1.amazonaws.com/hello-world-dev-app:latest`)
      - **container_port**: Port your container exposes (default: 80)
      - **cpu**: CPU units (256, 512, 1024, etc.)
      - **memory**: Memory in MB (512, 1024, 2048, etc.)
@@ -79,12 +115,23 @@ The solution consists of:
      - **alert_email**: Email for CloudWatch alerts
      - **aws_region**: AWS region (default: us-east-1)
 
+**Note:** When you deploy infrastructure, an ECR repository is automatically created with the name `{app_name}-{environment}-app`. You can use the ECR repository URL from Terraform outputs to get the exact image URI.
+
 ### Example Workflow Inputs
 
+**Build Image:**
 ```
 app_name: hello-world
 environment: dev
-container_image: nginx:latest
+aws_region: us-east-1
+image_tag: v1.0.0  # Optional
+```
+
+**Deploy Infrastructure:**
+```
+app_name: hello-world
+environment: dev
+container_image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/hello-world-dev-app:latest
 container_port: 80
 cpu: 256
 memory: 512
@@ -130,15 +177,26 @@ If you prefer to deploy manually:
    ```bash
    terraform output service_url
    terraform output s3_bucket_name
+   terraform output ecr_repository_url
    ```
+
+   The `ecr_repository_url` output shows the ECR repository where you should push your Docker images.
 
 ## Terraform Modules
 
 The infrastructure is organized into reusable modules:
 
-- **modules/ecs**: ECS Fargate cluster, service, VPC, ALB, and networking
+- **modules/ecs**: ECS Fargate cluster, service, VPC, ALB, ECR repository, and networking
 - **modules/s3**: S3 bucket with encryption, versioning, and public access blocking
 - **modules/cloudwatch**: CloudWatch alarms for CPU and error logs with SNS notifications
+
+### ECR Repository
+
+The ECS module automatically creates an ECR repository with:
+- Image scanning enabled on push
+- AES256 encryption
+- Lifecycle policy to keep the last 10 images
+- Repository name: `{app_name}-{environment}-app`
 
 ## Testing
 
@@ -167,20 +225,23 @@ Or find it in the GitHub Actions workflow output. The service will be accessible
 
 ## Updating Infrastructure
 
-### Update Container Image via GitHub Actions
+### Build and Deploy New Image Version
 
-To update the container image (e.g., deploy a new version of your application):
+To deploy a new version of your application:
 
-1. Go to your repository on GitHub
-2. Click the **Actions** tab
-3. Select **Update Infrastructure** in the left sidebar
-4. Click **Run workflow** (top right)
-5. Fill in the inputs:
-   - **app_name**: Must match the app name used during deployment
-   - **environment**: Must match the environment used during deployment (dev/staging/prod)
-   - **container_image**: New container image URL (e.g., `nginx:1.25`, `myapp:v2.0.0`, or `your-ecr-repo:latest`)
-   - **aws_region**: AWS region (default: us-east-1)
-6. Click **Run workflow**
+1. **Build and push new image:**
+   - Go to GitHub Actions → **"Build and Push Docker Image"**
+   - Run the workflow with your app_name and environment
+   - The workflow will build and push the image with a new tag (commit SHA or custom tag)
+
+2. **Update infrastructure with new image:**
+   - Go to GitHub Actions → **"Update Infrastructure"**
+   - Fill in the inputs:
+     - **app_name**: Must match the app name used during deployment
+     - **environment**: Must match the environment used during deployment (dev/staging/prod)
+     - **container_image**: New ECR image URL (e.g., `{account-id}.dkr.ecr.us-east-1.amazonaws.com/hello-world-dev-app:{new-tag}`)
+     - **aws_region**: AWS region (default: us-east-1)
+   - Click **Run workflow**
 
 The workflow will:
 - Read existing configuration values from Terraform state (CPU, memory, container port, etc.)
@@ -188,6 +249,13 @@ The workflow will:
 - Deploy the new image to ECS (ECS will automatically perform a rolling update)
 
 **Note:** The workflow automatically preserves existing values (CPU, memory, desired count, etc.) from your current deployment. Only the container image will be updated.
+
+### Quick Update Workflow
+
+For a complete CI/CD flow:
+1. Push code changes to `app/` directory → Build workflow triggers automatically
+2. Build workflow creates image with commit SHA tag
+3. Use the image URI from build workflow output in the Update Infrastructure workflow
 
 ### Manual Update
 
@@ -234,6 +302,7 @@ terraform destroy
 
 **⚠️ Warning:** This will permanently delete all infrastructure resources including:
 - ECS cluster, services, and tasks
+- ECR repository and all Docker images
 - VPC, subnets, NAT Gateway, and networking components
 - Application Load Balancer
 - S3 bucket and all its contents
@@ -252,6 +321,7 @@ See the `diagrams/` directory for architectural diagrams and CI/CD workflow char
 .
 ├── .github/
 │   └── workflows/
+│       ├── build-image.yml     # Build and push Docker image to ECR
 │       └── deploy.yml          # GitHub Actions deployment workflow
 ├── app/
 │   ├── Dockerfile              # Container definition
@@ -261,7 +331,7 @@ See the `diagrams/` directory for architectural diagrams and CI/CD workflow char
 │   ├── main.tf                 # Root module
 │   ├── variables.tf            # Root variables
 │   ├── modules/
-│   │   ├── ecs/                # ECS module
+│   │   ├── ecs/                # ECS module (includes ECR repository)
 │   │   ├── s3/                 # S3 module
 │   │   └── cloudwatch/         # CloudWatch module
 │   └── tests/                  # Terraform tests
@@ -273,6 +343,8 @@ See the `diagrams/` directory for architectural diagrams and CI/CD workflow char
 
 - S3 bucket encryption at rest (AES256)
 - S3 bucket public access blocked
+- ECR repository encryption (AES256)
+- ECR image scanning on push
 - VPC with private subnets for ECS tasks
 - Security groups restricting access
 - IAM roles with least privilege
@@ -281,6 +353,7 @@ See the `diagrams/` directory for architectural diagrams and CI/CD workflow char
 
 This setup uses:
 - ECS Fargate: Pay per vCPU and memory used
+- ECR: Pay per GB stored and per GB transferred
 - Application Load Balancer: ~$16/month
 - NAT Gateway: ~$32/month + data transfer
 - CloudWatch Logs: Based on log volume
@@ -290,8 +363,9 @@ This setup uses:
 ## Next Steps
 
 - Add HTTPS/SSL with ACM certificate
-- Add container image building in CI/CD
 - Implement blue/green deployments
 - Add autoscaling policies
 - Configure custom domain names
+- Add automated testing to build workflow
+- Set up image vulnerability scanning alerts
 

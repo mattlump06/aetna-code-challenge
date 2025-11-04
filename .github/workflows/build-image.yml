@@ -1,0 +1,150 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'app/**'
+      - '.github/workflows/build-image.yml'
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'Application name (must match existing deployment)'
+        required: true
+        type: string
+      environment:
+        description: 'Environment (dev/staging/prod)'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      aws_region:
+        description: 'AWS region'
+        required: true
+        type: string
+        default: 'us-east-1'
+      image_tag:
+        description: 'Image tag (default: latest or commit SHA)'
+        required: false
+        type: string
+
+env:
+  AWS_REGION: ${{ inputs.aws_region || 'us-east-1' }}
+
+jobs:
+  build-and-push:
+    name: Build and Push to ECR
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: GitHubActions-BuildImage
+
+      - name: Set variables
+        id: vars
+        run: |
+          # Determine app_name and environment
+          if [ -n "${{ inputs.app_name }}" ]; then
+            APP_NAME="${{ inputs.app_name }}"
+          else
+            # Default for automatic runs
+            APP_NAME="${APP_NAME:-hello-world}"
+          fi
+          
+          if [ -n "${{ inputs.environment }}" ]; then
+            ENVIRONMENT="${{ inputs.environment }}"
+          else
+            # Default for automatic runs
+            ENVIRONMENT="${ENVIRONMENT:-dev}"
+          fi
+          
+          # ECR repository name matches Terraform naming: {app_name}-{environment}-app
+          ECR_REPO_NAME="${APP_NAME}-${ENVIRONMENT}-app"
+          
+          # Determine image tag
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            IMAGE_TAG="${{ inputs.image_tag }}"
+          elif [ -n "${{ github.sha }}" ]; then
+            # Use short commit SHA (first 7 characters)
+            IMAGE_TAG=$(echo "${{ github.sha }}" | cut -c1-7)
+          else
+            IMAGE_TAG="latest"
+          fi
+          
+          # Get AWS account ID
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          
+          echo "app_name=${APP_NAME}" >> $GITHUB_OUTPUT
+          echo "environment=${ENVIRONMENT}" >> $GITHUB_OUTPUT
+          echo "ecr_repo_name=${ECR_REPO_NAME}" >> $GITHUB_OUTPUT
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID}" >> $GITHUB_OUTPUT
+          
+          echo "App Name: ${APP_NAME}"
+          echo "Environment: ${ENVIRONMENT}"
+          echo "ECR Repository: ${ECR_REPO_NAME}"
+          echo "Image Tag: ${IMAGE_TAG}"
+          echo "AWS Account ID: ${AWS_ACCOUNT_ID}"
+
+      - name: Get ECR repository URI
+        id: ecr
+        run: |
+          REPO_NAME="${{ steps.vars.outputs.ecr_repo_name }}"
+          AWS_ACCOUNT_ID="${{ steps.vars.outputs.AWS_ACCOUNT_ID }}"
+          AWS_REGION="${{ env.AWS_REGION }}"
+          
+          # Check if repository exists (should be created by Terraform)
+          if aws ecr describe-repositories --repository-names "${REPO_NAME}" --region "${AWS_REGION}" 2>/dev/null; then
+            echo "✓ ECR repository ${REPO_NAME} exists"
+          else
+            echo "⚠️  Warning: ECR repository ${REPO_NAME} does not exist"
+            echo "Creating ECR repository as fallback..."
+            aws ecr create-repository \
+              --repository-name "${REPO_NAME}" \
+              --region "${AWS_REGION}" \
+              --image-scanning-configuration scanOnPush=true \
+              --encryption-configuration encryptionType=AES256 || echo "Repository creation failed or already exists"
+          fi
+          
+          ECR_REPO_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${REPO_NAME}"
+          echo "ecr_repo_uri=${ECR_REPO_URI}" >> $GITHUB_OUTPUT
+          echo "ECR Repository URI: ${ECR_REPO_URI}"
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker image
+        working-directory: ./app
+        run: |
+          docker build -t ${{ steps.ecr.outputs.ecr_repo_uri }}:${{ steps.vars.outputs.image_tag }} .
+          docker tag ${{ steps.ecr.outputs.ecr_repo_uri }}:${{ steps.vars.outputs.image_tag }} ${{ steps.ecr.outputs.ecr_repo_uri }}:latest
+
+      - name: Push Docker image to ECR
+        run: |
+          docker push ${{ steps.ecr.outputs.ecr_repo_uri }}:${{ steps.vars.outputs.image_tag }}
+          docker push ${{ steps.ecr.outputs.ecr_repo_uri }}:latest
+
+      - name: Output image URI
+        run: |
+          echo "::notice::Docker image built and pushed successfully!"
+          echo "Image URI: ${{ steps.ecr.outputs.ecr_repo_uri }}:${{ steps.vars.outputs.image_tag }}"
+          echo "Latest tag: ${{ steps.ecr.outputs.ecr_repo_uri }}:latest"
+          echo ""
+          echo "To deploy this image, use the following container_image value in your deployment:"
+          echo "${{ steps.ecr.outputs.ecr_repo_uri }}:${{ steps.vars.outputs.image_tag }}"
+

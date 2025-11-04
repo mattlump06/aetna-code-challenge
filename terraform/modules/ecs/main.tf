@@ -235,6 +235,46 @@ resource "aws_lb_listener" "main" {
   }
 }
 
+# ECR Repository
+resource "aws_ecr_repository" "main" {
+  name                 = "${local.name_prefix}-app"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+
+  tags = {
+    Name        = "${local.name_prefix}-ecr"
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
+}
+
+# ECR Lifecycle Policy
+resource "aws_ecr_lifecycle_policy" "main" {
+  repository = aws_ecr_repository.main.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep last 10 images"
+      selection = {
+        tagStatus     = "any"
+        countType     = "imageCountMoreThan"
+        countNumber   = 10
+      }
+      action = {
+        type = "expire"
+      }
+    }]
+  })
+}
+
 # ECS Cluster
 resource "aws_ecs_cluster" "main" {
   name = "${local.name_prefix}-cluster"
