@@ -73,3 +73,8 @@ output "cloudwatch_alarm_names" {
   value       = module.cloudwatch.alarm_names
 }
 
+output "ecr_repository_url" {
+  description = "URL of the ECR repository for the application"
+  value       = module.ecs.ecr_repository_url
+}
+
