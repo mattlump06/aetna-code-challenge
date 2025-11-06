@@ -60,6 +60,41 @@ jobs:
           cd terraform
           terraform init
 
+      - name: Import existing ECR repository if needed
+        run: |
+          cd terraform
+          ECR_REPO_NAME="${{ inputs.app_name }}-${{ inputs.environment }}-app"
+          AWS_REGION="${{ inputs.aws_region }}"
+          
+          # Check if ECR repository exists in AWS
+          if aws ecr describe-repositories --repository-names "${ECR_REPO_NAME}" --region "${AWS_REGION}" &>/dev/null; then
+            echo "ECR repository ${ECR_REPO_NAME} exists in AWS"
+            
+            # Check if it's already in Terraform state
+            if terraform state list 2>/dev/null | grep -q "module.ecs.aws_ecr_repository.main"; then
+              echo "✓ ECR repository already in Terraform state, skipping import"
+            else
+              echo "Importing existing ECR repository into Terraform state..."
+              # Import the repository (ECR repository import uses just the repository name)
+              terraform import \
+                -var="app_name=${{ inputs.app_name }}" \
+                -var="environment=${{ inputs.environment }}" \
+                -var="container_image=dummy" \
+                -var="container_port=80" \
+                -var="cpu=256" \
+                -var="memory=512" \
+                -var="desired_count=1" \
+                -var="alert_email=dummy@example.com" \
+                -var="aws_region=${{ inputs.aws_region }}" \
+                "module.ecs.aws_ecr_repository.main" "${ECR_REPO_NAME}" || {
+                  echo "⚠️  Import failed or resource already exists in state"
+                  echo "Continuing with Terraform plan - it should detect the existing resource"
+                }
+            fi
+          else
+            echo "ECR repository ${ECR_REPO_NAME} does not exist, Terraform will create it"
+          fi
+
       - name: Ensure jq is installed
         run: |
           if ! command -v jq &> /dev/null; then
